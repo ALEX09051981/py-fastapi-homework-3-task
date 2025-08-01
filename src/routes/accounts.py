@@ -34,16 +34,14 @@ from security.passwords import hash_password, verify_password
 router = APIRouter()
 
 
-@router.post(
-    "/register/",
-    response_model=UserRegistrationResponseSchema,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/register/", response_model=UserRegistrationResponseSchema, status_code=status.HTTP_201_CREATED)
 async def register_user(
     user_data: UserRegistrationRequestSchema,
     db: AsyncSession = Depends(get_db),
 ):
-    group_result = await db.execute(select(UserGroupModel).filter(UserGroupModel.name == "user"))
+    group_result = await db.execute(
+        select(UserGroupModel).filter(UserGroupModel.name == "user")
+    )
     user_group = group_result.scalars().first()
 
     if not user_group:
@@ -53,12 +51,11 @@ async def register_user(
         )
 
     try:
-        new_user = UserModel(
+        new_user = UserModel.create(
             email=user_data.email,
-            is_active=False,
-            group_id=user_group.id,
+            raw_password=user_data.password,
+            group_id=user_group.id
         )
-        new_user.password = user_data.password
 
         db.add(new_user)
         await db.flush()
@@ -169,7 +166,9 @@ async def complete_password_reset(
     reset_data: PasswordResetCompleteRequestSchema,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(UserModel).filter(UserModel.email == reset_data.email))
+    result = await db.execute(
+        select(UserModel).filter(UserModel.email == reset_data.email)
+    )
     user = result.scalars().first()
 
     if not user or not user.is_active:
@@ -184,15 +183,22 @@ async def complete_password_reset(
     token_record = result.scalars().first()
 
     if not token_record:
-        await db.execute(
-            PasswordResetTokenModel.__table__.delete().where(
-                PasswordResetTokenModel.user_id == user.id
-            )
+        existing_token_stmt = select(PasswordResetTokenModel).where(
+            PasswordResetTokenModel.user_id == user.id
         )
-        await db.commit()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email or token.")
+        existing_token_result = await db.execute(existing_token_stmt)
+        existing_token = existing_token_result.scalars().first()
 
-    expires_at = cast(datetime, token_record.expires_at).replace(tzinfo=timezone.utc)
+        if existing_token:
+            await db.delete(existing_token)
+            await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email or token."
+        )
+
+    expires_at = token_record.expires_at.replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(timezone.utc):
         await db.delete(token_record)
         await db.commit()
@@ -200,6 +206,7 @@ async def complete_password_reset(
 
     try:
         user.password = reset_data.password
+
         await db.delete(token_record)
         await db.commit()
         return MessageResponseSchema(message="Password reset successfully.")
