@@ -53,11 +53,25 @@ class PasswordResetCompleteRequestSchema(BaseModel):
     token: str
     password: str  # тоже без constr, своя валидация
 
-    @validator('password')
-    def password_min_length(cls, v):
+    @validator("password")
+    def field_validate_password(cls, v):
+        errors = []
         if len(v) < 8:
-            raise ValueError("Password must contain at least 8 characters.")
+            errors.append("Password must contain at least 8 characters.")
+        if not re.search(r"\d", v):
+            errors.append("Password must contain at least one digit.")
+        if not re.search(r"[A-Z]", v):
+            errors.append("Password must contain at least one uppercase letter.")
+        if not re.search(r"[a-z]", v):
+            errors.append("Password must contain at least one lower letter.")
+        if not re.search(r"[@$!%*?#&]", v):
+            errors.append("Password must contain at least one special character: @, $, !, %, *, ?, #, &.")
+
+        if errors:
+            raise ValueError("; ".join(errors))
         return v
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserLoginRequestSchema(BaseModel):

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 
 from config import get_jwt_auth_manager
 from database import (
@@ -13,7 +14,7 @@ from database import (
     UserModel,
     RefreshTokenModel,
     get_db,
-    UserGroupEnum,
+    UserGroupEnum, UserGroupModel,
 )
 from schemas.accounts import (
     UserRegistrationRequestSchema,
@@ -42,31 +43,38 @@ async def register_user(
     user_data: UserRegistrationRequestSchema,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(UserModel).filter(UserModel.email == user_data.email))
-    existing_user = result.scalars().first()
+    group_result = await db.execute(select(UserGroupModel).filter(UserGroupModel.name == "user"))
+    user_group = group_result.scalars().first()
 
-    if existing_user:
+    if not user_group:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"A user with this email {user_data.email} already exists.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="User group not found.",
         )
 
     try:
         new_user = UserModel(
             email=user_data.email,
             is_active=False,
-            group_id=1,  # лучше получить динамически ID группы "user"
+            group_id=user_group.id,
         )
-        new_user.password = user_data.password  # сеттер для хеширования пароля
+        new_user.password = user_data.password
 
         db.add(new_user)
         await db.flush()
+
         activation_token = ActivationTokenModel(user_id=new_user.id)
         db.add(activation_token)
 
         await db.commit()
         await db.refresh(new_user)
-        return UserRegistrationResponseSchema.model_validate(new_user)  # Pydantic v2
+        return UserRegistrationResponseSchema.model_validate(new_user)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A user with this email {user_data.email} already exists.",
+        )
     except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(
@@ -176,7 +184,6 @@ async def complete_password_reset(
     token_record = result.scalars().first()
 
     if not token_record:
-        # Если токен не найден — удаляем все токены пользователя
         await db.execute(
             PasswordResetTokenModel.__table__.delete().where(
                 PasswordResetTokenModel.user_id == user.id
@@ -187,14 +194,13 @@ async def complete_password_reset(
 
     expires_at = cast(datetime, token_record.expires_at).replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(timezone.utc):
-        # Если токен просрочен — удаляем этот токен
         await db.delete(token_record)
         await db.commit()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email or token.")
 
     try:
-        user.password = reset_data.password  # вызываем setter для хэширования пароля
-        await db.delete(token_record)         # удаляем использованный токен
+        user.password = reset_data.password
+        await db.delete(token_record)
         await db.commit()
         return MessageResponseSchema(message="Password reset successfully.")
     except SQLAlchemyError:
